@@ -1,7 +1,7 @@
 // File: app/page.tsx
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
@@ -40,6 +40,116 @@ const OfficeLocationPlanner: React.FC = () => {
   const [officeAddress, setOfficeAddress] = useState<string>('');
   const [isSearchingOffice, setIsSearchingOffice] = useState<boolean>(false);
   const [isOptimizing, setIsOptimizing] = useState<boolean>(false);
+
+  // Define calculateCommuteTimes with useCallback to avoid dependency issues
+  const calculateCommuteTimes = useCallback(async (
+    office: [number, number], 
+    employeeList: Employee[] = employees
+  ): Promise<void> => {
+    console.log('calculateCommuteTimes called with office:', office);
+    console.log('employeeList received:', employeeList);
+    console.log('employeeList length:', employeeList.length);
+    
+    if (!employeeList.length) {
+      console.log('Early return - no employees');
+      return;
+    }
+    
+    setIsLoading(true);
+    setLoadingMessage('Calculating commute times...');
+    
+    // Check if employees have coordinates
+    const employeesWithCoords = employeeList.filter(e => e.lng !== undefined && e.lat !== undefined);
+    console.log('Employees with coordinates:', employeesWithCoords.length);
+    console.log('First few employees:', employeesWithCoords.slice(0, 3));
+    
+    const commutePromises = employeesWithCoords.map(async (employee, index): Promise<CommuteData> => {
+      setLoadingMessage(`Calculating commute ${index + 1}/${employeesWithCoords.length}...`);
+      
+      // Initialize result with employee data and null commute values
+      const result: CommuteData = {
+        ...employee,
+        walkingDuration: null,
+        walkingDistance: null,
+        drivingDuration: null,
+        drivingDistance: null
+      };
+      
+      try {
+        // Calculate walking route
+        setLoadingMessage(`Calculating walking route for ${employee.name}...`);
+        const walkingResponse = await fetch(
+          `https://api.mapbox.com/directions/v5/mapbox/walking/${employee.lng},${employee.lat};${office[0]},${office[1]}?access_token=${mapboxgl.accessToken}&geometries=geojson&overview=full`
+        );
+        
+        const walkingData = await walkingResponse.json();
+        
+        if (walkingData.routes && walkingData.routes.length > 0) {
+          const walkingDuration = walkingData.routes[0].duration / 60; // Convert to minutes
+          const walkingDistance = walkingData.routes[0].distance / 1000; // Convert to km
+          
+          result.walkingDuration = Math.round(walkingDuration);
+          result.walkingDistance = Math.round(walkingDistance * 10) / 10;
+        }
+        
+        // Rate limiting between API calls
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Calculate driving route
+        setLoadingMessage(`Calculating driving route for ${employee.name}...`);
+        const drivingResponse = await fetch(
+          `https://api.mapbox.com/directions/v5/mapbox/driving/${employee.lng},${employee.lat};${office[0]},${office[1]}?access_token=${mapboxgl.accessToken}&geometries=geojson&overview=full`
+        );
+        
+        const drivingData = await drivingResponse.json();
+        
+        if (drivingData.routes && drivingData.routes.length > 0) {
+          const drivingDuration = drivingData.routes[0].duration / 60; // Convert to minutes
+          const drivingDistance = drivingData.routes[0].distance / 1000; // Convert to km
+          
+          result.drivingDuration = Math.round(drivingDuration);
+          result.drivingDistance = Math.round(drivingDistance * 10) / 10;
+        }
+        
+        // Rate limiting between employees
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+      } catch (error) {
+        console.error('Routing error for employee:', employee.id, error);
+      }
+      
+      return result;
+    });
+
+    const results: CommuteData[] = [];
+    for (const promise of commutePromises) {
+      const result = await promise;
+      results.push(result);
+    }
+
+    console.log('Setting commuteData with results:', results.length);
+    setCommuteData(results);
+    
+    // Calculate average walking commute time
+    const validWalkingCommutes = results.filter(r => r.walkingDuration !== null);
+    console.log('Valid walking commutes for average calculation:', validWalkingCommutes.length);
+    const walkingAverage = validWalkingCommutes.length > 0 
+      ? validWalkingCommutes.reduce((sum, r) => sum + (r.walkingDuration || 0), 0) / validWalkingCommutes.length 
+      : 0;
+    console.log('Calculated walking average:', walkingAverage);
+    setAverageWalkingCommute(Math.round(walkingAverage));
+    
+    // Calculate average driving commute time
+    const validDrivingCommutes = results.filter(r => r.drivingDuration !== null);
+    console.log('Valid driving commutes for average calculation:', validDrivingCommutes.length);
+    const drivingAverage = validDrivingCommutes.length > 0 
+      ? validDrivingCommutes.reduce((sum, r) => sum + (r.drivingDuration || 0), 0) / validDrivingCommutes.length 
+      : 0;
+    console.log('Calculated driving average:', drivingAverage);
+    setAverageDrivingCommute(Math.round(drivingAverage));
+    
+    setIsLoading(false);
+  }, [employees]);
 
   // Update the ref whenever employees state changes
   useEffect(() => {
@@ -94,7 +204,7 @@ const OfficeLocationPlanner: React.FC = () => {
         map.current.remove();
       }
     };
-  }, []);
+  }, [officeLocation, calculateCommuteTimes]);
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -156,7 +266,8 @@ const OfficeLocationPlanner: React.FC = () => {
           
           // Add employee marker to map
           if (map.current) {
-            const marker = new mapboxgl.Marker({ 
+            // Use the marker but don't assign it to a variable since we don't need it later
+            new mapboxgl.Marker({ 
               color: '#0080ff',
               className: 'employee-marker'
             })
@@ -300,115 +411,6 @@ const OfficeLocationPlanner: React.FC = () => {
     }
     
     setIsOptimizing(false);
-  };
-
-  const calculateCommuteTimes = async (
-    office: [number, number], 
-    employeeList: Employee[] = employees
-  ): Promise<void> => {
-    console.log('calculateCommuteTimes called with office:', office);
-    console.log('employeeList received:', employeeList);
-    console.log('employeeList length:', employeeList.length);
-    
-    if (!employeeList.length) {
-      console.log('Early return - no employees');
-      return;
-    }
-    
-    setIsLoading(true);
-    setLoadingMessage('Calculating commute times...');
-    
-    // Check if employees have coordinates
-    const employeesWithCoords = employeeList.filter(e => e.lng !== undefined && e.lat !== undefined);
-    console.log('Employees with coordinates:', employeesWithCoords.length);
-    console.log('First few employees:', employeesWithCoords.slice(0, 3));
-    
-    const commutePromises = employeesWithCoords.map(async (employee, index): Promise<CommuteData> => {
-      setLoadingMessage(`Calculating commute ${index + 1}/${employeesWithCoords.length}...`);
-      
-      // Initialize result with employee data and null commute values
-      let result: CommuteData = {
-        ...employee,
-        walkingDuration: null,
-        walkingDistance: null,
-        drivingDuration: null,
-        drivingDistance: null
-      };
-      
-      try {
-        // Calculate walking route
-        setLoadingMessage(`Calculating walking route for ${employee.name}...`);
-        const walkingResponse = await fetch(
-          `https://api.mapbox.com/directions/v5/mapbox/walking/${employee.lng},${employee.lat};${office[0]},${office[1]}?access_token=${mapboxgl.accessToken}&geometries=geojson&overview=full`
-        );
-        
-        const walkingData = await walkingResponse.json();
-        
-        if (walkingData.routes && walkingData.routes.length > 0) {
-          const walkingDuration = walkingData.routes[0].duration / 60; // Convert to minutes
-          const walkingDistance = walkingData.routes[0].distance / 1000; // Convert to km
-          
-          result.walkingDuration = Math.round(walkingDuration);
-          result.walkingDistance = Math.round(walkingDistance * 10) / 10;
-        }
-        
-        // Rate limiting between API calls
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // Calculate driving route
-        setLoadingMessage(`Calculating driving route for ${employee.name}...`);
-        const drivingResponse = await fetch(
-          `https://api.mapbox.com/directions/v5/mapbox/driving/${employee.lng},${employee.lat};${office[0]},${office[1]}?access_token=${mapboxgl.accessToken}&geometries=geojson&overview=full`
-        );
-        
-        const drivingData = await drivingResponse.json();
-        
-        if (drivingData.routes && drivingData.routes.length > 0) {
-          const drivingDuration = drivingData.routes[0].duration / 60; // Convert to minutes
-          const drivingDistance = drivingData.routes[0].distance / 1000; // Convert to km
-          
-          result.drivingDuration = Math.round(drivingDuration);
-          result.drivingDistance = Math.round(drivingDistance * 10) / 10;
-        }
-        
-        // Rate limiting between employees
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-      } catch (error) {
-        console.error('Routing error for employee:', employee.id, error);
-      }
-      
-      return result;
-    });
-
-    const results: CommuteData[] = [];
-    for (const promise of commutePromises) {
-      const result = await promise;
-      results.push(result);
-    }
-
-    console.log('Setting commuteData with results:', results.length);
-    setCommuteData(results);
-    
-    // Calculate average walking commute time
-    const validWalkingCommutes = results.filter(r => r.walkingDuration !== null);
-    console.log('Valid walking commutes for average calculation:', validWalkingCommutes.length);
-    const walkingAverage = validWalkingCommutes.length > 0 
-      ? validWalkingCommutes.reduce((sum, r) => sum + (r.walkingDuration || 0), 0) / validWalkingCommutes.length 
-      : 0;
-    console.log('Calculated walking average:', walkingAverage);
-    setAverageWalkingCommute(Math.round(walkingAverage));
-    
-    // Calculate average driving commute time
-    const validDrivingCommutes = results.filter(r => r.drivingDuration !== null);
-    console.log('Valid driving commutes for average calculation:', validDrivingCommutes.length);
-    const drivingAverage = validDrivingCommutes.length > 0 
-      ? validDrivingCommutes.reduce((sum, r) => sum + (r.drivingDuration || 0), 0) / validDrivingCommutes.length 
-      : 0;
-    console.log('Calculated driving average:', drivingAverage);
-    setAverageDrivingCommute(Math.round(drivingAverage));
-    
-    setIsLoading(false);
   };
 
   if (!process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN) {
