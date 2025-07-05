@@ -16,16 +16,25 @@ interface Employee {
   coordinates?: [number, number];
   lat?: number;
   lng?: number;
+  clientOfficeAddress?: string;
+  clientOfficeCoordinates?: [number, number];
+  clientOfficeLat?: number;
+  clientOfficeLng?: number;
 }
 
 interface CommuteData extends Employee {
-  walkingDuration: number | null;
-  walkingDistance: number | null;
+  // Main office commute data
   drivingDuration: number | null;
   drivingDistance: number | null;
   transitDuration: number | null;
   transitDistance: number | null;
   transitSteps: string | null;
+  // Client office commute data
+  clientDrivingDuration: number | null;
+  clientDrivingDistance: number | null;
+  clientTransitDuration: number | null;
+  clientTransitDistance: number | null;
+  clientTransitSteps: string | null;
 }
 
 const OfficeLocationPlanner: React.FC = () => {
@@ -36,7 +45,6 @@ const OfficeLocationPlanner: React.FC = () => {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [officeLocation, setOfficeLocation] = useState<[number, number]>([151.2093, -33.8688]); // Sydney CBD
   const [commuteData, setCommuteData] = useState<CommuteData[]>([]);
-  const [averageWalkingCommute, setAverageWalkingCommute] = useState<number>(0);
   const [averageDrivingCommute, setAverageDrivingCommute] = useState<number>(0);
   const [averageTransitCommute, setAverageTransitCommute] = useState<number>(0);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -86,35 +94,19 @@ const OfficeLocationPlanner: React.FC = () => {
       // Initialize result with employee data and null commute values
       const result: CommuteData = {
         ...employee,
-        walkingDuration: null,
-        walkingDistance: null,
         drivingDuration: null,
         drivingDistance: null,
         transitDuration: null,
         transitDistance: null,
-        transitSteps: null
+        transitSteps: null,
+        clientDrivingDuration: null,
+        clientDrivingDistance: null,
+        clientTransitDuration: null,
+        clientTransitDistance: null,
+        clientTransitSteps: null
       };
       
       try {
-        // Calculate walking route
-        setLoadingMessage(`Calculating walking route for ${employee.name}...`);
-        const walkingResponse = await fetch(
-          `https://api.mapbox.com/directions/v5/mapbox/walking/${employee.lng},${employee.lat};${office[0]},${office[1]}?access_token=${mapboxgl.accessToken}&geometries=geojson&overview=full`
-        );
-        
-        const walkingData = await walkingResponse.json();
-        
-        if (walkingData.routes && walkingData.routes.length > 0) {
-          const walkingDuration = walkingData.routes[0].duration / 60; // Convert to minutes
-          const walkingDistance = walkingData.routes[0].distance / 1000; // Convert to km
-          
-          result.walkingDuration = Math.round(walkingDuration);
-          result.walkingDistance = Math.round(walkingDistance * 10) / 10;
-        }
-        
-        // Rate limiting between API calls
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
         // Calculate driving route
         setLoadingMessage(`Calculating driving route for ${employee.name}...`);
         const drivingResponse = await fetch(
@@ -178,6 +170,76 @@ const OfficeLocationPlanner: React.FC = () => {
           console.error('Transit routing error for employee:', employee.name, transitError);
         }
         
+        // Calculate client office commutes if employee has a client office
+        if (employee.clientOfficeLat && employee.clientOfficeLng) {
+          setLoadingMessage(`Calculating client office routes for ${employee.name}...`);
+          
+          try {
+            // Calculate driving route to client office
+            const clientDrivingResponse = await fetch(
+              `https://api.mapbox.com/directions/v5/mapbox/driving/${employee.lng},${employee.lat};${employee.clientOfficeLng},${employee.clientOfficeLat}?access_token=${mapboxgl.accessToken}&geometries=geojson&overview=full`
+            );
+            
+            const clientDrivingData = await clientDrivingResponse.json();
+            
+            if (clientDrivingData.routes && clientDrivingData.routes.length > 0) {
+              const clientDrivingDuration = clientDrivingData.routes[0].duration / 60; // Convert to minutes
+              const clientDrivingDistance = clientDrivingData.routes[0].distance / 1000; // Convert to km
+              
+              result.clientDrivingDuration = Math.round(clientDrivingDuration);
+              result.clientDrivingDistance = Math.round(clientDrivingDistance * 10) / 10;
+            }
+            
+            // Rate limiting between API calls
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+            // Calculate transit route to client office
+            try {
+              const clientTransitResponse = await fetch(
+                `/api/transit?origin=${employee.lat},${employee.lng}&destination=${employee.clientOfficeLat},${employee.clientOfficeLng}`
+              );
+              
+              if (!clientTransitResponse.ok) {
+                throw new Error(`Client transit API responded with status: ${clientTransitResponse.status}`);
+              }
+              
+              const clientTransitData = await clientTransitResponse.json();
+              
+              if (clientTransitData.routes && clientTransitData.routes.length > 0) {
+                const clientRoute = clientTransitData.routes[0];
+                const clientLeg = clientRoute.legs[0];
+                
+                if (clientLeg) {
+                  const clientTransitDuration = clientLeg.duration.value / 60; // Convert to minutes
+                  const clientTransitDistance = clientLeg.distance.value / 1000; // Convert to km
+                  
+                  result.clientTransitDuration = Math.round(clientTransitDuration);
+                  result.clientTransitDistance = Math.round(clientTransitDistance * 10) / 10;
+                  
+                  // Extract client transit steps for display
+                  const clientTransitSteps = clientLeg.steps
+                    .filter((step: any) => step.travel_mode === 'TRANSIT')
+                    .map((step: any) => {
+                      const transitDetails = step.transit_details;
+                      if (transitDetails) {
+                        return `${transitDetails.line.short_name || transitDetails.line.name} (${transitDetails.departure_stop.name} → ${transitDetails.arrival_stop.name})`;
+                      }
+                      return null;
+                    })
+                    .filter(Boolean)
+                    .join(', ');
+                  
+                  result.clientTransitSteps = clientTransitSteps || null;
+                }
+              }
+            } catch (clientTransitError) {
+              console.error('Client transit routing error for employee:', employee.name, clientTransitError);
+            }
+          } catch (clientError) {
+            console.error('Client office routing error for employee:', employee.name, clientError);
+          }
+        }
+        
         // Rate limiting between employees
         await new Promise(resolve => setTimeout(resolve, 100));
         
@@ -196,15 +258,6 @@ const OfficeLocationPlanner: React.FC = () => {
 
     console.log('Setting commuteData with results:', results.length);
     setCommuteData(results);
-    
-    // Calculate average walking commute time
-    const validWalkingCommutes = results.filter(r => r.walkingDuration !== null);
-    console.log('Valid walking commutes for average calculation:', validWalkingCommutes.length);
-    const walkingAverage = validWalkingCommutes.length > 0 
-      ? validWalkingCommutes.reduce((sum, r) => sum + (r.walkingDuration || 0), 0) / validWalkingCommutes.length 
-      : 0;
-    console.log('Calculated walking average:', walkingAverage);
-    setAverageWalkingCommute(Math.round(walkingAverage));
     
     // Calculate average driving commute time
     const validDrivingCommutes = results.filter(r => r.drivingDuration !== null);
@@ -349,7 +402,8 @@ const OfficeLocationPlanner: React.FC = () => {
             return {
               id: index,
               address: values[0]?.trim() || '',
-              name: values[1]?.trim() || `Employee ${index + 1}`
+              name: values[1]?.trim() || `Employee ${index + 1}`,
+              clientOfficeAddress: values[2]?.trim() || undefined
             };
           });
         
@@ -396,13 +450,64 @@ const OfficeLocationPlanner: React.FC = () => {
             console.warn('Geocoded coordinates outside Sydney area for:', employee.address, 'Got:', coordinates);
           }
           
-          const geocodedEmployee: Employee = {
+          let geocodedEmployee: Employee = {
             ...employee,
             coordinates: coordinates,
             lat: coordinates[1],
             lng: coordinates[0]
           };
+
+          // If employee has a client office address, geocode that too
+          if (employee.clientOfficeAddress) {
+            try {
+              setLoadingMessage(`Geocoding client office for ${employee.name}...`);
+              const clientResponse = await fetch(
+                `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(
+                  employee.clientOfficeAddress + ', Sydney, Australia'
+                )}.json?access_token=${mapboxgl.accessToken}&limit=1&proximity=151.2093,-33.8688&bbox=150.5,-34.5,152.0,-33.2`
+              );
+              const clientData = await clientResponse.json();
+              
+              if (clientData.features && clientData.features.length > 0) {
+                const clientCoordinates: [number, number] = clientData.features[0].center;
+                geocodedEmployee.clientOfficeCoordinates = clientCoordinates;
+                geocodedEmployee.clientOfficeLat = clientCoordinates[1];
+                geocodedEmployee.clientOfficeLng = clientCoordinates[0];
+                
+                console.log('Geocoded client office for:', employee.name, 'at:', clientCoordinates);
+              } else {
+                console.warn('Could not geocode client office for:', employee.name, employee.clientOfficeAddress);
+              }
+              
+              // Rate limiting for client office geocoding
+              await new Promise(resolve => setTimeout(resolve, 100));
+            } catch (clientError) {
+              console.error('Error geocoding client office for:', employee.name, clientError);
+            }
+          }
+          
           geocodedEmployees.push(geocodedEmployee);
+          
+          // Add client office marker to map if it exists
+          if (geocodedEmployee.clientOfficeCoordinates && map.current && map.current.loaded()) {
+            try {
+              new mapboxgl.Marker({ 
+                color: '#ffaa00',  // Orange for client offices
+                className: 'client-office-marker'
+              })
+                .setLngLat(geocodedEmployee.clientOfficeCoordinates)
+                .setPopup(new mapboxgl.Popup().setHTML(`
+                  <div class="p-2">
+                    <strong>Client Office</strong><br/>
+                    <span class="text-sm text-gray-600">${geocodedEmployee.clientOfficeAddress}</span><br/>
+                    <span class="text-xs text-blue-600">Employee: ${geocodedEmployee.name}</span>
+                  </div>
+                `))
+                .addTo(map.current);
+            } catch (error) {
+              console.error('Error adding client office marker for:', geocodedEmployee.name, error);
+            }
+          }
           
           // Add employee marker to map - wait for map to be ready
           if (map.current && map.current.loaded()) {
@@ -696,7 +801,7 @@ const OfficeLocationPlanner: React.FC = () => {
             disabled={isLoading}
           />
           <p className="text-xs text-gray-500 mt-1">
-            CSV format: address, name (optional)
+            CSV format: address, name, client office address (optional)
           </p>
         </div>
 
@@ -716,7 +821,6 @@ const OfficeLocationPlanner: React.FC = () => {
             <h3 className="font-semibold mb-2 text-gray-800">📊 Commute Statistics</h3>
             <div className="space-y-1 text-sm text-black">
               <p><span className="font-medium">Total Employees:</span> {employees.length}</p>
-              <p><span className="font-medium">Average Walking Time:</span> {averageWalkingCommute} minutes</p>
               <p><span className="font-medium">Average Driving Time:</span> {averageDrivingCommute} minutes</p>
               <p><span className="font-medium">Average Transit Time:</span> {averageTransitCommute} minutes</p>
               <p><span className="font-medium">Office Location:</span></p>
@@ -742,10 +846,13 @@ const OfficeLocationPlanner: React.FC = () => {
             <div className="mt-4">
               <p className="text-sm font-medium text-blue-800 mb-2">CSV Example:</p>
               <pre className="text-xs bg-blue-100 p-2 rounded">
-{`123 George Street Sydney,John Doe
-456 Pitt Street Sydney,Jane Smith
-789 Elizabeth Street Sydney,Bob Wilson`}
+{`123 George Street Sydney,John Doe,456 Pitt Street Sydney
+456 Pitt Street Sydney,Jane Smith,
+789 Elizabeth Street Sydney,Bob Wilson,100 Miller Street Sydney`}
               </pre>
+              <p className="text-xs text-blue-700 mt-2">
+                💡 Leave client office column empty if employee only works at main office
+              </p>
             </div>
           </div>
         )}
@@ -756,48 +863,80 @@ const OfficeLocationPlanner: React.FC = () => {
             <h3 className="font-semibold p-4 border-b text-gray-800">👥 Employee Commutes</h3>
             <div className="max-h-96 overflow-y-auto">
               {commuteData
-                .sort((a, b) => (b.walkingDuration || 0) - (a.walkingDuration || 0))
+                .sort((a, b) => (b.drivingDuration || 0) - (a.drivingDuration || 0))
                 .map((employee) => (
                   <div key={employee.id} className="p-3 border-b border-gray-100 hover:bg-gray-50">
                     <div className="font-medium text-gray-800">{employee.name}</div>
                     <div className="text-sm text-gray-600 mb-1">{employee.address}</div>
-                    <div className="flex flex-col space-y-1">
-                      {employee.walkingDuration && (
-                        <div className="text-sm">
-                          <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
-                            employee.walkingDuration > 45 ? 'bg-red-100 text-red-800' :
-                            employee.walkingDuration > 30 ? 'bg-yellow-100 text-yellow-800' :
-                            'bg-green-100 text-green-800'
-                          }`}>
-                            🚶 {employee.walkingDuration} min walk • {employee.walkingDistance} km
-                          </span>
-                        </div>
-                      )}
-                      {employee.drivingDuration && (
-                        <div className="text-sm">
-                          <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
-                            employee.drivingDuration > 20 ? 'bg-red-100 text-red-800' :
-                            employee.drivingDuration > 10 ? 'bg-yellow-100 text-yellow-800' :
-                            'bg-green-100 text-green-800'
-                          }`}>
-                            🚗 {employee.drivingDuration} min drive • {employee.drivingDistance} km
-                          </span>
-                        </div>
-                      )}
-                      {employee.transitDuration && (
-                        <div className="text-sm">
-                          <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
-                            employee.transitDuration > 60 ? 'bg-red-100 text-red-800' :
-                            employee.transitDuration > 40 ? 'bg-yellow-100 text-yellow-800' :
-                            'bg-green-100 text-green-800'
-                          }`}>
-                            🚇 {employee.transitDuration} min transit • {employee.transitDistance} km
-                          </span>
-                          {employee.transitSteps && (
-                            <div className="text-xs text-gray-600 mt-1 ml-2">
-                              {employee.transitSteps}
+                    <div className="flex flex-col space-y-2">
+                      {/* Main Office Commute */}
+                      <div>
+                        <div className="text-xs font-medium text-gray-700 mb-1">🔴 Main Office:</div>
+                        <div className="flex flex-col space-y-1 ml-2">
+                          {employee.drivingDuration && (
+                            <div className="text-sm">
+                              <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                                employee.drivingDuration > 20 ? 'bg-red-100 text-red-800' :
+                                employee.drivingDuration > 10 ? 'bg-yellow-100 text-yellow-800' :
+                                'bg-green-100 text-green-800'
+                              }`}>
+                                🚗 {employee.drivingDuration} min drive • {employee.drivingDistance} km
+                              </span>
                             </div>
                           )}
+                          {employee.transitDuration && (
+                            <div className="text-sm">
+                              <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                                employee.transitDuration > 60 ? 'bg-red-100 text-red-800' :
+                                employee.transitDuration > 40 ? 'bg-yellow-100 text-yellow-800' :
+                                'bg-green-100 text-green-800'
+                              }`}>
+                                🚇 {employee.transitDuration} min transit • {employee.transitDistance} km
+                              </span>
+                              {employee.transitSteps && (
+                                <div className="text-xs text-gray-600 mt-1 ml-2">
+                                  {employee.transitSteps}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Client Office Commute */}
+                      {employee.clientOfficeAddress && (
+                        <div>
+                          <div className="text-xs font-medium text-gray-700 mb-1">🟠 Client Office:</div>
+                          <div className="text-xs text-gray-600 mb-1 ml-2">{employee.clientOfficeAddress}</div>
+                          <div className="flex flex-col space-y-1 ml-2">
+                            {employee.clientDrivingDuration && (
+                              <div className="text-sm">
+                                <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                                  employee.clientDrivingDuration > 20 ? 'bg-red-100 text-red-800' :
+                                  employee.clientDrivingDuration > 10 ? 'bg-yellow-100 text-yellow-800' :
+                                  'bg-green-100 text-green-800'
+                                }`}>
+                                  🚗 {employee.clientDrivingDuration} min drive • {employee.clientDrivingDistance} km
+                                </span>
+                              </div>
+                            )}
+                            {employee.clientTransitDuration && (
+                              <div className="text-sm">
+                                <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                                  employee.clientTransitDuration > 60 ? 'bg-red-100 text-red-800' :
+                                  employee.clientTransitDuration > 40 ? 'bg-yellow-100 text-yellow-800' :
+                                  'bg-green-100 text-green-800'
+                                }`}>
+                                  🚇 {employee.clientTransitDuration} min transit • {employee.clientTransitDistance} km
+                                </span>
+                                {employee.clientTransitSteps && (
+                                  <div className="text-xs text-gray-600 mt-1 ml-2">
+                                    {employee.clientTransitSteps}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -822,9 +961,12 @@ const OfficeLocationPlanner: React.FC = () => {
               <div className="w-4 h-4 bg-blue-500 rounded-full mr-3"></div>
               <span className="font-medium">Employee Locations</span>
             </div>
+            <div className="flex items-center">
+              <div className="w-4 h-4 bg-orange-500 rounded-full mr-3"></div>
+              <span className="font-medium">Client Offices</span>
+            </div>
             <div className="mt-3 space-y-1">
               <div className="font-medium mb-1">Commute Times:</div>
-              <div className="ml-2">🚶 Walking: 🟢 ≤30 min • 🟡 30-45 min • 🔴 &gt;45 min</div>
               <div className="ml-2">🚗 Driving: 🟢 ≤10 min • 🟡 10-20 min • 🔴 &gt;20 min</div>
               <div className="ml-2">🚇 Transit: 🟢 ≤40 min • 🟡 40-60 min • 🔴 &gt;60 min</div>
             </div>
