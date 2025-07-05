@@ -23,6 +23,9 @@ interface CommuteData extends Employee {
   walkingDistance: number | null;
   drivingDuration: number | null;
   drivingDistance: number | null;
+  transitDuration: number | null;
+  transitDistance: number | null;
+  transitSteps: string | null;
 }
 
 const OfficeLocationPlanner: React.FC = () => {
@@ -35,11 +38,13 @@ const OfficeLocationPlanner: React.FC = () => {
   const [commuteData, setCommuteData] = useState<CommuteData[]>([]);
   const [averageWalkingCommute, setAverageWalkingCommute] = useState<number>(0);
   const [averageDrivingCommute, setAverageDrivingCommute] = useState<number>(0);
+  const [averageTransitCommute, setAverageTransitCommute] = useState<number>(0);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
   const [officeAddress, setOfficeAddress] = useState<string>('');
   const [isSearchingOffice, setIsSearchingOffice] = useState<boolean>(false);
   const [isOptimizing, setIsOptimizing] = useState<boolean>(false);
+  const isDragging = useRef<boolean>(false);
 
   // Define calculateCommuteTimes with useCallback to avoid dependency issues
   const calculateCommuteTimes = useCallback(async (
@@ -58,9 +63,21 @@ const OfficeLocationPlanner: React.FC = () => {
     setIsLoading(true);
     setLoadingMessage('Calculating commute times...');
     
-    // Check if employees have coordinates
-    const employeesWithCoords = employeeList.filter(e => e.lng !== undefined && e.lat !== undefined);
-    console.log('Employees with coordinates:', employeesWithCoords.length);
+    // Check if employees have coordinates and validate them
+    const employeesWithCoords = employeeList.filter(e => {
+      const hasCoords = e.lng !== undefined && e.lat !== undefined;
+      const validCoords = hasCoords && 
+        !isNaN(e.lng!) && !isNaN(e.lat!) && 
+        e.lng! >= -180 && e.lng! <= 180 && 
+        e.lat! >= -90 && e.lat! <= 90;
+      
+      if (hasCoords && !validCoords) {
+        console.warn('Invalid coordinates for employee:', e.name, 'lat:', e.lat, 'lng:', e.lng);
+      }
+      
+      return validCoords;
+    });
+    console.log('Employees with valid coordinates:', employeesWithCoords.length);
     console.log('First few employees:', employeesWithCoords.slice(0, 3));
     
     const commutePromises = employeesWithCoords.map(async (employee, index): Promise<CommuteData> => {
@@ -72,7 +89,10 @@ const OfficeLocationPlanner: React.FC = () => {
         walkingDuration: null,
         walkingDistance: null,
         drivingDuration: null,
-        drivingDistance: null
+        drivingDistance: null,
+        transitDuration: null,
+        transitDistance: null,
+        transitSteps: null
       };
       
       try {
@@ -109,6 +129,53 @@ const OfficeLocationPlanner: React.FC = () => {
           
           result.drivingDuration = Math.round(drivingDuration);
           result.drivingDistance = Math.round(drivingDistance * 10) / 10;
+        }
+        
+        // Rate limiting between API calls
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Calculate transit route using Google Directions API via our API route
+        setLoadingMessage(`Calculating transit route for ${employee.name}...`);
+        try {
+          const transitResponse = await fetch(
+            `/api/transit?origin=${employee.lat},${employee.lng}&destination=${office[1]},${office[0]}`
+          );
+          
+          if (!transitResponse.ok) {
+            throw new Error(`Transit API responded with status: ${transitResponse.status}`);
+          }
+          
+          const transitData = await transitResponse.json();
+          
+          if (transitData.routes && transitData.routes.length > 0) {
+            const route = transitData.routes[0];
+            const leg = route.legs[0];
+            
+            if (leg) {
+              const transitDuration = leg.duration.value / 60; // Convert to minutes
+              const transitDistance = leg.distance.value / 1000; // Convert to km
+              
+              result.transitDuration = Math.round(transitDuration);
+              result.transitDistance = Math.round(transitDistance * 10) / 10;
+              
+              // Extract transit steps for display
+              const transitSteps = leg.steps
+                .filter((step: any) => step.travel_mode === 'TRANSIT')
+                .map((step: any) => {
+                  const transitDetails = step.transit_details;
+                  if (transitDetails) {
+                    return `${transitDetails.line.short_name || transitDetails.line.name} (${transitDetails.departure_stop.name} → ${transitDetails.arrival_stop.name})`;
+                  }
+                  return null;
+                })
+                .filter(Boolean)
+                .join(', ');
+              
+              result.transitSteps = transitSteps || null;
+            }
+          }
+        } catch (transitError) {
+          console.error('Transit routing error for employee:', employee.name, transitError);
         }
         
         // Rate limiting between employees
@@ -148,6 +215,15 @@ const OfficeLocationPlanner: React.FC = () => {
     console.log('Calculated driving average:', drivingAverage);
     setAverageDrivingCommute(Math.round(drivingAverage));
     
+    // Calculate average transit commute time
+    const validTransitCommutes = results.filter(r => r.transitDuration !== null);
+    console.log('Valid transit commutes for average calculation:', validTransitCommutes.length);
+    const transitAverage = validTransitCommutes.length > 0 
+      ? validTransitCommutes.reduce((sum, r) => sum + (r.transitDuration || 0), 0) / validTransitCommutes.length 
+      : 0;
+    console.log('Calculated transit average:', transitAverage);
+    setAverageTransitCommute(Math.round(transitAverage));
+    
     setIsLoading(false);
   }, [employees]);
 
@@ -162,41 +238,81 @@ const OfficeLocationPlanner: React.FC = () => {
 
     if (!mapContainer.current) return;
 
-    map.current = new mapboxgl.Map({
-      container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/light-v11',
-      center: officeLocation,
-      zoom: 11
+    console.log('Initializing map with token:', mapboxgl.accessToken ? 'present' : 'missing');
+    console.log('Map container:', mapContainer.current);
+
+    try {
+      map.current = new mapboxgl.Map({
+        container: mapContainer.current,
+        style: 'mapbox://styles/mapbox/light-v11',
+        center: officeLocation,
+        zoom: 11
+      });
+
+      console.log('Map created successfully');
+    } catch (error) {
+      console.error('Error creating map:', error);
+      return;
+    }
+
+    // Add error handling for map loading
+    map.current.on('error', (e) => {
+      console.error('Map error:', e);
+    });
+
+    map.current.on('styleloadstart', () => {
+      console.log('Map style loading started');
+    });
+
+    map.current.on('styleload', () => {
+      console.log('Map style loaded');
     });
 
     map.current.on('load', () => {
+      console.log('Map loaded successfully');
       if (!map.current) return;
 
       // Add office marker
-      const officeMarker = new mapboxgl.Marker({
-        color: '#ff0000',
-        draggable: true
-      })
-        .setLngLat(officeLocation)
-        .addTo(map.current);
+      try {
+        const officeMarker = new mapboxgl.Marker({
+          color: '#ff0000',
+          draggable: true
+        })
+          .setLngLat(officeLocation)
+          .addTo(map.current);
 
-      officeMarkerRef.current = officeMarker;
+        officeMarkerRef.current = officeMarker;
+        console.log('Office marker added successfully');
 
-      officeMarker.on('dragend', () => {
-        const newLocation = officeMarker.getLngLat();
-        const newLocationArray: [number, number] = [newLocation.lng, newLocation.lat];
-        console.log('Drag ended, new office location:', newLocationArray);
-        setOfficeLocation(newLocationArray);
-        // Use employeesRef instead of employees to get current state
-        console.log('Current employees state (from ref):', employeesRef.current);
-        console.log('Employees length (from ref):', employeesRef.current.length);
-        if (employeesRef.current.length > 0) {
-          console.log('Calling calculateCommuteTimes with new office location');
-          calculateCommuteTimes(newLocationArray, employeesRef.current);
-        } else {
-          console.log('Not calling calculateCommuteTimes - no employees');
-        }
-      });
+        // Add drag event handlers
+        officeMarker.on('dragstart', () => {
+          isDragging.current = true;
+        });
+        
+        officeMarker.on('dragend', () => {
+          const newLocation = officeMarker.getLngLat();
+          const newLocationArray: [number, number] = [newLocation.lng, newLocation.lat];
+          console.log('Drag ended, new office location:', newLocationArray);
+          
+          // Set dragging to false after a short delay to allow state update
+          setTimeout(() => {
+            isDragging.current = false;
+          }, 100);
+          
+          setOfficeLocation(newLocationArray);
+          // Use employeesRef instead of employees to get current state
+          console.log('Current employees state (from ref):', employeesRef.current);
+          console.log('Employees length (from ref):', employeesRef.current.length);
+          if (employeesRef.current.length > 0) {
+            console.log('Calling calculateCommuteTimes with new office location');
+            calculateCommuteTimes(newLocationArray, employeesRef.current);
+          } else {
+            console.log('Not calling calculateCommuteTimes - no employees');
+          }
+        });
+      } catch (error) {
+        console.error('Error adding office marker:', error);
+      }
     });
 
     return () => {
@@ -204,7 +320,19 @@ const OfficeLocationPlanner: React.FC = () => {
         map.current.remove();
       }
     };
-  }, [officeLocation, calculateCommuteTimes]);
+  }, []); // Empty dependency array - map should only initialize once
+
+  // Separate useEffect to handle office location updates without recreating the map
+  useEffect(() => {
+    if (officeMarkerRef.current && map.current && !isDragging.current) {
+      officeMarkerRef.current.setLngLat(officeLocation);
+      map.current.flyTo({
+        center: officeLocation,
+        zoom: 11,
+        essential: true
+      });
+    }
+  }, [officeLocation]);
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -250,12 +378,24 @@ const OfficeLocationPlanner: React.FC = () => {
         const response = await fetch(
           `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(
             employee.address + ', Sydney, Australia'
-          )}.json?access_token=${mapboxgl.accessToken}&limit=1`
+          )}.json?access_token=${mapboxgl.accessToken}&limit=1&proximity=151.2093,-33.8688&bbox=150.5,-34.5,152.0,-33.2`
         );
         const data = await response.json();
         
         if (data.features && data.features.length > 0) {
           const coordinates: [number, number] = data.features[0].center;
+          
+          // Validate that coordinates are actually in Sydney area
+          const lng = coordinates[0];
+          const lat = coordinates[1];
+          
+          // Sydney bounding box: roughly 150.5 to 152.0 longitude, -34.5 to -33.2 latitude
+          const isInSydney = lng >= 150.5 && lng <= 152.0 && lat >= -34.5 && lat <= -33.2;
+          
+          if (!isInSydney) {
+            console.warn('Geocoded coordinates outside Sydney area for:', employee.address, 'Got:', coordinates);
+          }
+          
           const geocodedEmployee: Employee = {
             ...employee,
             coordinates: coordinates,
@@ -264,21 +404,51 @@ const OfficeLocationPlanner: React.FC = () => {
           };
           geocodedEmployees.push(geocodedEmployee);
           
-          // Add employee marker to map
-          if (map.current) {
-            // Use the marker but don't assign it to a variable since we don't need it later
-            new mapboxgl.Marker({ 
-              color: '#0080ff',
-              className: 'employee-marker'
-            })
-              .setLngLat(coordinates)
-              .setPopup(new mapboxgl.Popup().setHTML(`
-                <div class="p-2">
-                  <strong>${employee.name}</strong><br/>
-                  <span class="text-sm text-gray-600">${employee.address}</span>
-                </div>
-              `))
-              .addTo(map.current);
+          // Add employee marker to map - wait for map to be ready
+          if (map.current && map.current.loaded()) {
+            try {
+              // Use the marker but don't assign it to a variable since we don't need it later
+              new mapboxgl.Marker({ 
+                color: '#0080ff',
+                className: 'employee-marker'
+              })
+                .setLngLat(coordinates)
+                .setPopup(new mapboxgl.Popup().setHTML(`
+                  <div class="p-2">
+                    <strong>${employee.name}</strong><br/>
+                    <span class="text-sm text-gray-600">${employee.address}</span>
+                  </div>
+                `))
+                .addTo(map.current);
+            } catch (error) {
+              console.error('Error adding marker for employee:', employee.name, error);
+            }
+          } else {
+            // Map not ready yet, wait for it
+            const waitForMap = () => {
+              if (map.current && map.current.loaded()) {
+                try {
+                  new mapboxgl.Marker({ 
+                    color: '#0080ff',
+                    className: 'employee-marker'
+                  })
+                    .setLngLat(coordinates)
+                    .setPopup(new mapboxgl.Popup().setHTML(`
+                      <div class="p-2">
+                        <strong>${employee.name}</strong><br/>
+                        <span class="text-sm text-gray-600">${employee.address}</span>
+                      </div>
+                    `))
+                    .addTo(map.current);
+                } catch (error) {
+                  console.error('Error adding marker for employee (delayed):', employee.name, error);
+                }
+              } else {
+                // Try again in 100ms
+                setTimeout(waitForMap, 100);
+              }
+            };
+            waitForMap();
           }
         }
         
@@ -432,6 +602,20 @@ const OfficeLocationPlanner: React.FC = () => {
     );
   }
 
+  // Additional check for token validity
+  if (!mapboxgl.accessToken || mapboxgl.accessToken === '') {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gray-100">
+        <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+          <h2 className="text-2xl font-bold text-red-600 mb-4">Invalid Mapbox Token</h2>
+          <p className="text-gray-600 mb-4">
+            The Mapbox token is not properly set. Current token: {process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN ? 'present but invalid' : 'missing'}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen">
       {/* Control Panel */}
@@ -534,6 +718,7 @@ const OfficeLocationPlanner: React.FC = () => {
               <p><span className="font-medium">Total Employees:</span> {employees.length}</p>
               <p><span className="font-medium">Average Walking Time:</span> {averageWalkingCommute} minutes</p>
               <p><span className="font-medium">Average Driving Time:</span> {averageDrivingCommute} minutes</p>
+              <p><span className="font-medium">Average Transit Time:</span> {averageTransitCommute} minutes</p>
               <p><span className="font-medium">Office Location:</span></p>
               <p className="text-xs text-black ml-2">
                 Lat: {officeLocation[1].toFixed(4)}, Lng: {officeLocation[0].toFixed(4)}
@@ -599,6 +784,22 @@ const OfficeLocationPlanner: React.FC = () => {
                           </span>
                         </div>
                       )}
+                      {employee.transitDuration && (
+                        <div className="text-sm">
+                          <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                            employee.transitDuration > 60 ? 'bg-red-100 text-red-800' :
+                            employee.transitDuration > 40 ? 'bg-yellow-100 text-yellow-800' :
+                            'bg-green-100 text-green-800'
+                          }`}>
+                            🚇 {employee.transitDuration} min transit • {employee.transitDistance} km
+                          </span>
+                          {employee.transitSteps && (
+                            <div className="text-xs text-gray-600 mt-1 ml-2">
+                              {employee.transitSteps}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -609,7 +810,7 @@ const OfficeLocationPlanner: React.FC = () => {
 
       {/* Map */}
       <div className="w-2/3 relative">
-        <div ref={mapContainer} className="w-full h-full" />
+        <div ref={mapContainer} className="w-full h-full" style={{ minHeight: '600px' }} />
         <div className="absolute top-4 right-4 bg-white p-4 rounded-lg shadow-lg">
           <div className="text-sm space-y-3 text-black">
             <h4 className="font-medium mb-2">Map Legend</h4>
@@ -625,6 +826,7 @@ const OfficeLocationPlanner: React.FC = () => {
               <div className="font-medium mb-1">Commute Times:</div>
               <div className="ml-2">🚶 Walking: 🟢 ≤30 min • 🟡 30-45 min • 🔴 &gt;45 min</div>
               <div className="ml-2">🚗 Driving: 🟢 ≤10 min • 🟡 10-20 min • 🔴 &gt;20 min</div>
+              <div className="ml-2">🚇 Transit: 🟢 ≤40 min • 🟡 40-60 min • 🔴 &gt;60 min</div>
             </div>
           </div>
         </div>
