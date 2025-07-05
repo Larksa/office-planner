@@ -4,6 +4,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
+import * as XLSX from 'xlsx';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line, PieChart, Pie, Cell } from 'recharts';
 
 // Set your Mapbox access token from environment variable
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN || '';
@@ -53,6 +55,174 @@ const OfficeLocationPlanner: React.FC = () => {
   const [isSearchingOffice, setIsSearchingOffice] = useState<boolean>(false);
   const [isOptimizing, setIsOptimizing] = useState<boolean>(false);
   const isDragging = useRef<boolean>(false);
+
+  // Excel export functionality
+  const exportToExcel = useCallback(() => {
+    if (commuteData.length === 0) {
+      alert('No data to export. Please upload employee data first.');
+      return;
+    }
+
+    // Create workbook
+    const workbook = XLSX.utils.book_new();
+
+    // Sheet 1: Employee Summary
+    const employeeSummaryData = commuteData.map(employee => ({
+      'Employee Name': employee.name,
+      'Home Address': employee.address,
+      'Main Office - Drive Time (min)': employee.drivingDuration || 'N/A',
+      'Main Office - Drive Distance (km)': employee.drivingDistance || 'N/A',
+      'Main Office - Transit Time (min)': employee.transitDuration || 'N/A',
+      'Main Office - Transit Distance (km)': employee.transitDistance || 'N/A',
+      'Main Office - Transit Route': employee.transitSteps || 'N/A',
+      'Client Office Address': employee.clientOfficeAddress || 'N/A',
+      'Client Office - Drive Time (min)': employee.clientDrivingDuration || 'N/A',
+      'Client Office - Drive Distance (km)': employee.clientDrivingDistance || 'N/A',
+      'Client Office - Transit Time (min)': employee.clientTransitDuration || 'N/A',
+      'Client Office - Transit Distance (km)': employee.clientTransitDistance || 'N/A',
+      'Client Office - Transit Route': employee.clientTransitSteps || 'N/A',
+      'Best Main Office Option': employee.drivingDuration && employee.transitDuration 
+        ? (employee.drivingDuration < employee.transitDuration ? 'Drive' : 'Transit')
+        : (employee.drivingDuration ? 'Drive' : (employee.transitDuration ? 'Transit' : 'N/A')),
+      'Best Client Office Option': employee.clientDrivingDuration && employee.clientTransitDuration 
+        ? (employee.clientDrivingDuration < employee.clientTransitDuration ? 'Drive' : 'Transit')
+        : (employee.clientDrivingDuration ? 'Drive' : (employee.clientTransitDuration ? 'Transit' : 'N/A'))
+    }));
+
+    const employeeSheet = XLSX.utils.json_to_sheet(employeeSummaryData);
+    XLSX.utils.book_append_sheet(workbook, employeeSheet, 'Employee Summary');
+
+    // Sheet 2: Statistics & Analysis
+    const validDriving = commuteData.filter(e => e.drivingDuration !== null);
+    const validTransit = commuteData.filter(e => e.transitDuration !== null);
+    const validClientDriving = commuteData.filter(e => e.clientDrivingDuration !== null);
+    const validClientTransit = commuteData.filter(e => e.clientTransitDuration !== null);
+
+    const statsData = [
+      { 'Metric': 'Total Employees', 'Value': commuteData.length },
+      { 'Metric': 'Office Location (Lat)', 'Value': officeLocation[1].toFixed(6) },
+      { 'Metric': 'Office Location (Lng)', 'Value': officeLocation[0].toFixed(6) },
+      { 'Metric': '', 'Value': '' },
+      { 'Metric': 'MAIN OFFICE STATISTICS', 'Value': '' },
+      { 'Metric': 'Average Drive Time (min)', 'Value': averageDrivingCommute },
+      { 'Metric': 'Average Transit Time (min)', 'Value': averageTransitCommute },
+      { 'Metric': 'Employees with Drive Data', 'Value': validDriving.length },
+      { 'Metric': 'Employees with Transit Data', 'Value': validTransit.length },
+      { 'Metric': 'Employees >20min Drive', 'Value': validDriving.filter(e => (e.drivingDuration || 0) > 20).length },
+      { 'Metric': 'Employees >40min Transit', 'Value': validTransit.filter(e => (e.transitDuration || 0) > 40).length },
+      { 'Metric': '', 'Value': '' },
+      { 'Metric': 'CLIENT OFFICE STATISTICS', 'Value': '' },
+      { 'Metric': 'Employees with Client Offices', 'Value': commuteData.filter(e => e.clientOfficeAddress).length },
+      { 'Metric': 'Avg Client Drive Time (min)', 'Value': validClientDriving.length > 0 
+        ? Math.round(validClientDriving.reduce((sum, e) => sum + (e.clientDrivingDuration || 0), 0) / validClientDriving.length) 
+        : 'N/A' },
+      { 'Metric': 'Avg Client Transit Time (min)', 'Value': validClientTransit.length > 0 
+        ? Math.round(validClientTransit.reduce((sum, e) => sum + (e.clientTransitDuration || 0), 0) / validClientTransit.length) 
+        : 'N/A' },
+      { 'Metric': 'Client Employees >20min Drive', 'Value': validClientDriving.filter(e => (e.clientDrivingDuration || 0) > 20).length },
+      { 'Metric': 'Client Employees >40min Transit', 'Value': validClientTransit.filter(e => (e.clientTransitDuration || 0) > 40).length }
+    ];
+
+    const statsSheet = XLSX.utils.json_to_sheet(statsData);
+    XLSX.utils.book_append_sheet(workbook, statsSheet, 'Statistics');
+
+    // Sheet 3: Business Insights
+    const totalMainDriveTime = validDriving.reduce((sum, e) => sum + (e.drivingDuration || 0), 0);
+    const totalMainTransitTime = validTransit.reduce((sum, e) => sum + (e.transitDuration || 0), 0);
+    const totalClientDriveTime = validClientDriving.reduce((sum, e) => sum + (e.clientDrivingDuration || 0), 0);
+    const totalClientTransitTime = validClientTransit.reduce((sum, e) => sum + (e.clientTransitDuration || 0), 0);
+
+    const insightsData = [
+      { 'Analysis': 'COMMUTE TIME ANALYSIS', 'Value': '', 'Notes': '' },
+      { 'Analysis': 'Total daily commute hours (main office)', 'Value': Math.round((totalMainDriveTime + totalMainTransitTime) / 60 * 10) / 10, 'Notes': 'Hours per day for all employees' },
+      { 'Analysis': 'Total daily commute hours (client offices)', 'Value': Math.round((totalClientDriveTime + totalClientTransitTime) / 60 * 10) / 10, 'Notes': 'Hours per day for employees with client offices' },
+      { 'Analysis': 'Employees at risk (>45min commute)', 'Value': validDriving.filter(e => (e.drivingDuration || 0) > 45).length + validTransit.filter(e => (e.transitDuration || 0) > 45).length, 'Notes': 'May consider remote work or leaving' },
+      { 'Analysis': '', 'Value': '', 'Notes': '' },
+      { 'Analysis': 'TRANSPORT MODE PREFERENCES', 'Value': '', 'Notes': '' },
+      { 'Analysis': 'Employees preferring driving (main)', 'Value': commuteData.filter(e => e.drivingDuration && e.transitDuration && e.drivingDuration < e.transitDuration).length, 'Notes': 'Driving is faster than transit' },
+      { 'Analysis': 'Employees preferring transit (main)', 'Value': commuteData.filter(e => e.drivingDuration && e.transitDuration && e.transitDuration < e.drivingDuration).length, 'Notes': 'Transit is faster than driving' },
+      { 'Analysis': 'Employees preferring driving (client)', 'Value': commuteData.filter(e => e.clientDrivingDuration && e.clientTransitDuration && e.clientDrivingDuration < e.clientTransitDuration).length, 'Notes': 'Driving is faster to client office' },
+      { 'Analysis': 'Employees preferring transit (client)', 'Value': commuteData.filter(e => e.clientDrivingDuration && e.clientTransitDuration && e.clientTransitDuration < e.clientDrivingDuration).length, 'Notes': 'Transit is faster to client office' },
+      { 'Analysis': '', 'Value': '', 'Notes': '' },
+      { 'Analysis': 'RECOMMENDATIONS', 'Value': '', 'Notes': '' },
+      { 'Analysis': 'Office accessibility score', 'Value': Math.round((10 - (averageDrivingCommute + averageTransitCommute) / 2 / 6) * 10) / 10, 'Notes': 'Out of 10 (higher is better)' },
+      { 'Analysis': 'Consider remote work for', 'Value': commuteData.filter(e => (e.drivingDuration || 0) > 60 || (e.transitDuration || 0) > 90).map(e => e.name).join(', ') || 'None', 'Notes': 'Employees with very long commutes' }
+    ];
+
+    const insightsSheet = XLSX.utils.json_to_sheet(insightsData);
+    XLSX.utils.book_append_sheet(workbook, insightsSheet, 'Business Insights');
+
+    // Generate filename with current date
+    const now = new Date();
+    const filename = `Office_Location_Analysis_${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}.xlsx`;
+
+    // Save file
+    XLSX.writeFile(workbook, filename);
+  }, [commuteData, officeLocation, averageDrivingCommute, averageTransitCommute]);
+
+  // Chart data preparation
+  const getEmployeeDistributionData = useCallback(() => {
+    return commuteData
+      .map((employee, index) => ({
+        name: employee.name,
+        index: index + 1,
+        mainDrive: employee.drivingDuration || 0,
+        mainTransit: employee.transitDuration || 0,
+        clientDrive: employee.clientDrivingDuration || 0,
+        clientTransit: employee.clientTransitDuration || 0,
+        hasClientOffice: !!employee.clientOfficeAddress
+      }))
+      .sort((a, b) => (b.mainDrive + b.mainTransit) - (a.mainDrive + a.mainTransit));
+  }, [commuteData]);
+
+  const getBellCurveData = useCallback(() => {
+    const ranges = Array.from({ length: 12 }, (_, i) => ({
+      range: `${i * 10}-${(i + 1) * 10}`,
+      mainDrive: 0,
+      mainTransit: 0,
+      clientDrive: 0,
+      clientTransit: 0
+    }));
+
+    commuteData.forEach(employee => {
+      if (employee.drivingDuration) {
+        const rangeIndex = Math.min(Math.floor(employee.drivingDuration / 10), 11);
+        ranges[rangeIndex].mainDrive++;
+      }
+      if (employee.transitDuration) {
+        const rangeIndex = Math.min(Math.floor(employee.transitDuration / 10), 11);
+        ranges[rangeIndex].mainTransit++;
+      }
+      if (employee.clientDrivingDuration) {
+        const rangeIndex = Math.min(Math.floor(employee.clientDrivingDuration / 10), 11);
+        ranges[rangeIndex].clientDrive++;
+      }
+      if (employee.clientTransitDuration) {
+        const rangeIndex = Math.min(Math.floor(employee.clientTransitDuration / 10), 11);
+        ranges[rangeIndex].clientTransit++;
+      }
+    });
+
+    return ranges;
+  }, [commuteData]);
+
+  const getTransportPreferenceData = useCallback(() => {
+    const mainOfficeData = commuteData.filter(e => e.drivingDuration && e.transitDuration);
+    const clientOfficeData = commuteData.filter(e => e.clientDrivingDuration && e.clientTransitDuration);
+
+    const mainDrivePreferred = mainOfficeData.filter(e => e.drivingDuration! < e.transitDuration!).length;
+    const mainTransitPreferred = mainOfficeData.filter(e => e.transitDuration! < e.drivingDuration!).length;
+    
+    const clientDrivePreferred = clientOfficeData.filter(e => e.clientDrivingDuration! < e.clientTransitDuration!).length;
+    const clientTransitPreferred = clientOfficeData.filter(e => e.clientTransitDuration! < e.clientDrivingDuration!).length;
+
+    return [
+      { name: 'Main Office - Drive Preferred', value: mainDrivePreferred, fill: '#ef4444' },
+      { name: 'Main Office - Transit Preferred', value: mainTransitPreferred, fill: '#3b82f6' },
+      { name: 'Client Office - Drive Preferred', value: clientDrivePreferred, fill: '#f97316' },
+      { name: 'Client Office - Transit Preferred', value: clientTransitPreferred, fill: '#8b5cf6' }
+    ];
+  }, [commuteData]);
 
   // Define calculateCommuteTimes with useCallback to avoid dependency issues
   const calculateCommuteTimes = useCallback(async (
@@ -818,7 +988,18 @@ const OfficeLocationPlanner: React.FC = () => {
         {/* Stats */}
         {commuteData.length > 0 && !isLoading && (
           <div className="mb-6 p-4 bg-white rounded-lg shadow">
-            <h3 className="font-semibold mb-2 text-gray-800">📊 Commute Statistics</h3>
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="font-semibold text-gray-800">📊 Commute Statistics</h3>
+              <button
+                onClick={exportToExcel}
+                className="px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-1 flex items-center"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                Export Excel
+              </button>
+            </div>
             <div className="space-y-1 text-sm text-black">
               <p><span className="font-medium">Total Employees:</span> {employees.length}</p>
               <p><span className="font-medium">Average Driving Time:</span> {averageDrivingCommute} minutes</p>
@@ -827,6 +1008,95 @@ const OfficeLocationPlanner: React.FC = () => {
               <p className="text-xs text-black ml-2">
                 Lat: {officeLocation[1].toFixed(4)}, Lng: {officeLocation[0].toFixed(4)}
               </p>
+            </div>
+          </div>
+        )}
+
+        {/* Analytics Dashboard */}
+        {commuteData.length > 0 && !isLoading && (
+          <div className="mb-6 space-y-4">
+            {/* Employee Commute Distribution Chart */}
+            <div className="p-4 bg-white rounded-lg shadow">
+              <h3 className="font-semibold mb-3 text-gray-800">📈 Employee Commute Distribution</h3>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={getEmployeeDistributionData()}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis 
+                      dataKey="name" 
+                      angle={-45}
+                      textAnchor="end"
+                      height={80}
+                      fontSize={10}
+                    />
+                    <YAxis label={{ value: 'Minutes', angle: -90, position: 'insideLeft' }} />
+                    <Tooltip 
+                      formatter={(value, name) => [
+                        `${value} min`, 
+                        name === 'mainDrive' ? 'Main Office - Drive' :
+                        name === 'mainTransit' ? 'Main Office - Transit' :
+                        name === 'clientDrive' ? 'Client Office - Drive' :
+                        'Client Office - Transit'
+                      ]}
+                    />
+                    <Legend />
+                    <Bar dataKey="mainDrive" stackId="main" fill="#ef4444" name="Main Drive" />
+                    <Bar dataKey="mainTransit" stackId="main" fill="#3b82f6" name="Main Transit" />
+                    <Bar dataKey="clientDrive" stackId="client" fill="#f97316" name="Client Drive" />
+                    <Bar dataKey="clientTransit" stackId="client" fill="#8b5cf6" name="Client Transit" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            {/* Commute Time Distribution Bell Curve */}
+            <div className="p-4 bg-white rounded-lg shadow">
+              <h3 className="font-semibold mb-3 text-gray-800">📊 Commute Time Distribution</h3>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={getBellCurveData()}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="range" label={{ value: 'Time Range (minutes)', position: 'insideBottom', offset: -5 }} />
+                    <YAxis label={{ value: 'Number of Employees', angle: -90, position: 'insideLeft' }} />
+                    <Tooltip formatter={(value, name) => [
+                      `${value} employees`, 
+                      name === 'mainDrive' ? 'Main Office - Drive' :
+                      name === 'mainTransit' ? 'Main Office - Transit' :
+                      name === 'clientDrive' ? 'Client Office - Drive' :
+                      'Client Office - Transit'
+                    ]} />
+                    <Legend />
+                    <Line type="monotone" dataKey="mainDrive" stroke="#ef4444" strokeWidth={2} name="Main Drive" />
+                    <Line type="monotone" dataKey="mainTransit" stroke="#3b82f6" strokeWidth={2} name="Main Transit" />
+                    <Line type="monotone" dataKey="clientDrive" stroke="#f97316" strokeWidth={2} name="Client Drive" />
+                    <Line type="monotone" dataKey="clientTransit" stroke="#8b5cf6" strokeWidth={2} name="Client Transit" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            {/* Transport Mode Preferences */}
+            <div className="p-4 bg-white rounded-lg shadow">
+              <h3 className="font-semibold mb-3 text-gray-800">🚗🚇 Transport Mode Preferences</h3>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={getTransportPreferenceData()}
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={80}
+                      dataKey="value"
+                      label={({ name, value }) => `${name}: ${value}`}
+                    >
+                      {getTransportPreferenceData().map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.fill} />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
             </div>
           </div>
         )}
